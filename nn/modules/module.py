@@ -154,7 +154,7 @@ class Module(object):
         elif param.grad_fn:
             raise ValueError(
                 # TODO
-                # 这里是说往模型增加的参数应该是leaf层的
+                # 这里是说往模型增加的参数应该是leaf层的, 不过我还不清楚为什么这样
 
                 # 这里是说如果你往模型里面增加了一个已经有了有grad_fn这个属性
                 # 那它肯定就不是leaf层的咯，讲得通
@@ -396,7 +396,10 @@ class Module(object):
                     [-0.5112, -0.2324]], dtype=torch.float16)
 
         """
-
+        """
+        non-blocking指的是不要阻塞，如果non-blocking设置为True的话，就用异步地方式将cpu上的tensor
+        迁移到gpu上
+        """
         device, dtype, non_blocking = torch._C._nn._parse_to(*args, **kwargs)
 
         if dtype is not None:
@@ -404,7 +407,14 @@ class Module(object):
                 raise TypeError('nn.Module.to only accepts floating point '
                                 'dtypes, but got desired dtype={}'.format(dtype))
 
+        # 上面我们得到了non_blocking，如果t（注意t是module的一个param，别忘啦）不是浮点数，
         def convert(t):
+            # 一开始脑残一直以为是(None, non_blocking)或者是(device, dtype)，一直疑惑跟to方法的参数对应不上啊
+            # 下面的return语句其实是
+            # >>> middle_input = dtype
+            # >>> if not t.is_floating_point():
+            # >>>     middle_input = None
+            # >>> return t.to(device, middle_input, non_blocking)
             return t.to(device, dtype if t.is_floating_point() else None, non_blocking)
 
         return self._apply(convert)
@@ -428,11 +438,37 @@ class Module(object):
                 a handle that can be used to remove the added hook by calling
                 ``handle.remove()``
         """
+        """
+        
+        """
+        # TODO:首先什么是hook？hook是形如hook(module, grad_input, grad_output) -> Tensor or None的函数
+        # self._backward_hooks是个字典
+        # 在RemovableHooks的__init__方法里面，要求它的参数是hooks_dict，显然self._backward_hooks是满足的
+        # 有一点在设计上蛮有意思的，让我想起了单例模式（但不是很有联系啦，只是在我见过的只有单例模式有点联系）
+        # 这个设计就是next_id，当实例化之后，会把Removable这个类的next_id赋值给handle类的id属性
+        # 同时next_id每次都会加1，这样每一次创建一个RemovableHandle实例的id就不一样了
         handle = hooks.RemovableHandle(self._backward_hooks)
+
+        # 如上面注释所说，每一个handle的id都不一样，用它的id作为self._backward_hooks的key，
+        # 对应的value设置为hook，很合理
         self._backward_hooks[handle.id] = hook
+
+        # 上面的英文注释说的a handle that can be used to remove the added hook by calling `handle.remove()`
+        # 我稍微解释一下，你最好结合着跳转进RemovableHook的源代码里面看看,下面是remove的源代码
+        # >>>def remove(self):
+        # >>>    hooks_dict = self.hooks_dict_ref()
+        # >>>    if hooks_dict is not None and self.id in hooks_dict:
+        # >>>        del hooks_dict[self.id]
+        # 当运行handle.remove()时，注意hooks_dict_ref()不是函数，而是先self.hooks_dict_ref，它是
+        # 一个weakref，weakref是callable的（至于为什么...emm...扯太远了，就这么认为着吧）
+        # 然后用()来call它，得到了一个hook_dict，其实这个dict就是self._backward_hooks，weakref的原因
+        # 然后把这个dict中的id给删了，del hooks_dict[self.id]等于
+        # hooks_dict.pop(self.id)哈，就是从这个dict中弹出，id对应的就是hook呀，就这样把hook删了
         return handle
 
     def register_forward_pre_hook(self, hook):
+        # 完全跟上面那个一样啦，后面的register_forward_hook也是一样的
+        # TODO: pre_hook的pre是什么意思呀？
         r"""Registers a forward pre-hook on the module.
 
         The hook will be called every time before :func:`forward` is invoked.
@@ -471,6 +507,10 @@ class Module(object):
         return handle
 
     def _tracing_name(self, tracing_state):
+        # _tracing_name是服务于_slow_forward, slow_forward服务于__call__ !!!
+        # __call__是什么！是让模型来计算给定输入的输出，所以很重要呀
+        # TODO：这段代码怪怪的，似懂非懂
+
         if not tracing_state._traced_module_stack:
             return None
         module = tracing_state._traced_module_stack[-1]
@@ -480,6 +520,10 @@ class Module(object):
         return None
 
     def _slow_forward(self, *input, **kwargs):
+        """
+        大概就是很慢的forward计算？不是很明白
+        """
+        # 下面两步是得到input的tracing_state
         input_vars = tuple(torch.autograd.function._iter_tensors(input))
         tracing_state = torch.jit.get_tracing_state(input_vars)
         if not tracing_state:
@@ -520,6 +564,9 @@ class Module(object):
                 else:
                     var = var[0]
             grad_fn = var.grad_fn
+
+            # 这一步看出来啦，如果有梯度的话，要更新梯度了
+            #　TODO: 我好像还真不太知道grad的作用，后面再回头看吧
             if grad_fn is not None:
                 for hook in self._backward_hooks.values():
                     wrapper = functools.partial(hook, self)
@@ -527,7 +574,10 @@ class Module(object):
                     grad_fn.register_hook(wrapper)
         return result
 
+
+    # 下面四个__foo__的函数都是python相关的简单知识，不赘述
     def __setstate__(self, state):
+        # state是一个dict哈，下面才能update
         self.__dict__.update(state)
         if '_forward_pre_hooks' not in self.__dict__:
             self._forward_pre_hooks = OrderedDict()
@@ -617,6 +667,9 @@ class Module(object):
             >>> module.state_dict().keys()
             ['bias', 'weight']
 
+        """
+        """
+        返回的是模型的所有参数和需要一直参与计算的persistent buffer
         """
         if destination is None:
             destination = OrderedDict()
@@ -765,6 +818,9 @@ class Module(object):
             <class 'torch.FloatTensor'> (20L, 1L, 5L, 5L)
 
         """
+        """
+        生成存储参数的迭代器，后面几个最后有用yield的函数也是类似的，不赘述
+        """
         for name, param in self.named_parameters():
             yield param
 
@@ -781,6 +837,9 @@ class Module(object):
             >>>    if name in ['bias']:
             >>>        print(param.size())
 
+        """
+        """
+        生成(名字，参数)的迭代器
         """
         if memo is None:
             memo = set()
@@ -932,6 +991,7 @@ class Module(object):
                 p.grad.zero_()
 
     def share_memory(self):
+        """参见param和buffer的share_memory的"""
         return self._apply(lambda t: t.share_memory_())
 
     def _get_name(self):
